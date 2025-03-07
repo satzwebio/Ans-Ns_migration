@@ -1,0 +1,40 @@
+---
+# Email Notification Role
+- name: Prepare email content
+  set_fact:
+    email_subject: "Migration Completed: {{ migration_name }}"
+    email_body: |
+      Migration Details:
+      ----------------
+      Migration Name: {{ migration_name }}
+      Source Cluster: {{ source_cluster }}
+      Source Namespace: {{ source_namespace }}
+      Destination Cluster: {{ dest_cluster }}
+      Destination Namespace: {{ dest_namespace }}
+      Storage Repository: {{ storage_repo }}
+      
+      Status: {{ migration_status.resources[0].status.phase }}
+      Completion Time: {{ migration_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Succeeded') | map(attribute='lastTransitionTime') | first }}
+      
+      Migrated PVCs:
+      {% for pvc in selected_pvcs %}
+      - {{ pvc }}
+      {% endfor %}
+
+- name: Send email notification
+  mail:
+    host: "{{ email.smtp_host }}"
+    port: "{{ email.smtp_port }}"
+    username: "{{ email.smtp_username }}"
+    password: "{{ email.smtp_password }}"
+    from: "{{ email.from_address }}"
+    to: "{{ email.to_addresses }}"
+    subject: "{{ email_subject }}"
+    body: "{{ email_body }}"
+    secure: starttls
+  ignore_errors: true
+
+- name: Log email status
+  debug:
+    msg: "Email notification sent to {{ email.to_addresses | join(', ') }}"
+  when: not ansible_check_mode

@@ -1,0 +1,33 @@
+---
+# Migration Execution Role
+- name: Create MigMigration
+  k8s:
+    state: present
+    definition:
+      apiVersion: migration.openshift.io/v1alpha1
+      kind: MigMigration
+      metadata:
+        name: "{{ migration_name }}"
+        namespace: openshift-migration
+      spec:
+        migPlanRef:
+          name: "{{ migration_name }}-plan"
+          namespace: openshift-migration
+        stage: false
+        quiescePods: false
+
+- name: Wait for migration to complete
+  k8s_info:
+    api_version: migration.openshift.io/v1alpha1
+    kind: MigMigration
+    name: "{{ migration_name }}"
+    namespace: openshift-migration
+  register: migration_status
+  until: migration_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Succeeded') | list | length > 0
+  retries: 300
+  delay: 10
+
+- name: Check migration success
+  fail:
+    msg: "Migration failed: {{ migration_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Failed') | map(attribute='message') | join(' ') }}"
+  when: migration_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Failed') | list | length > 0

@@ -1,0 +1,27 @@
+---
+# Cluster Validation Role
+- name: Validate cluster connection
+  k8s_info:
+    host: "{{ cluster_url }}"
+    api_key: "{{ cluster_token }}"
+    validate_certs: false
+  register: cluster_check
+  ignore_errors: true
+
+- name: Check if cluster is accessible
+  fail:
+    msg: "Unable to connect to cluster {{ cluster_name }}"
+  when: cluster_check.failed
+
+- name: Verify MTC operator installation
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: mtc-operator
+    namespace: openshift-migration
+  register: mtc_check
+
+- name: Fail if MTC operator not found
+  fail:
+    msg: "MTC operator not found on cluster {{ cluster_name }}"
+  when: mtc_check.resources | length == 0

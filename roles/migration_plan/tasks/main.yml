@@ -1,0 +1,80 @@
+---
+# Migration Plan Creation Role
+- name: Generate unique migration name
+  set_fact:
+    migration_name: "migration-{{ source_namespace }}-{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+- name: Create MigCluster for source
+  k8s:
+    state: present
+    definition:
+      apiVersion: migration.openshift.io/v1alpha1
+      kind: MigCluster
+      metadata:
+        name: "source-cluster"
+        namespace: openshift-migration
+      spec:
+        isHostCluster: true
+
+- name: Create MigCluster for destination
+  k8s:
+    state: present
+    definition:
+      apiVersion: migration.openshift.io/v1alpha1
+      kind: MigCluster
+      metadata:
+        name: "dest-cluster"
+        namespace: openshift-migration
+      spec:
+        url: "{{ dest_cluster_url }}"
+        serviceAccountSecretRef:
+          name: "dest-cluster-secret"
+          namespace: openshift-migration
+
+- name: Create MigStorage
+  k8s:
+    state: present
+    definition:
+      apiVersion: migration.openshift.io/v1alpha1
+      kind: MigStorage
+      metadata:
+        name: "{{ storage_name }}"
+        namespace: openshift-migration
+      spec:
+        backupStorageProvider: aws
+        volumeSnapshotProvider: aws
+        backupStorageConfig:
+          awsBucketName: "{{ storage_bucket }}"
+          awsRegion: "{{ storage_region }}"
+          credsSecretRef:
+            name: "storage-secret"
+            namespace: openshift-migration
+
+- name: Create MigPlan
+  k8s:
+    state: present
+    definition:
+      apiVersion: migration.openshift.io/v1alpha1
+      kind: MigPlan
+      metadata:
+        name: "{{ migration_name }}-plan"
+        namespace: openshift-migration
+      spec:
+        srcMigClusterRef:
+          name: source-cluster
+          namespace: openshift-migration
+        destMigClusterRef:
+          name: dest-cluster
+          namespace: openshift-migration
+        migStorageRef:
+          name: "{{ storage_name }}"
+          namespace: openshift-migration
+        namespaces:
+          - "{{ source_namespace }}"
+        persistentVolumes:
+          - name: "{{ item }}"
+            selection:
+              action: copy
+              copyMethod: snapshot
+              verify: true
+      with_items: "{{ selected_pvcs }}"

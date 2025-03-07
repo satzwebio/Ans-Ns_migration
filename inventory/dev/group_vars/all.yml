@@ -1,0 +1,26 @@
+---
+# Development environment variables
+environment: dev
+mtc_operator_channel: release-v1.7
+mtc_operator_automatic_updates: true
+
+# Cluster configurations will be populated by Tower
+clusters: []
+
+# Storage repository configurations will be populated by Tower
+storage_repos: []
+
+# Default migration settings
+default_migration_settings:
+  verify_pv_copy: true
+  parallel_migrations: 2
+  migration_timeout: 3600
+
+# Email notification settings for development
+email_settings:
+  smtp_host: smtp.dev.example.com
+  smtp_port: 587
+  from_address: mtc-automation-dev@example.com
+  to_addresses:
+    - devteam@example.com
+    - operations@example.com

@@ -1,0 +1,38 @@
+---
+# Storage Repository Validation Role
+- name: Validate storage repository connection
+  aws_s3:
+    bucket: "{{ storage_bucket }}"
+    mode: list
+    aws_access_key: "{{ storage_access_key }}"
+    aws_secret_key: "{{ storage_secret_key }}"
+    endpoint_url: "{{ storage_endpoint }}"
+  register: storage_check
+  ignore_errors: true
+
+- name: Check if storage is accessible
+  fail:
+    msg: "Unable to access storage repository {{ storage_name }}"
+  when: storage_check.failed
+
+- name: Verify bucket permissions
+  aws_s3:
+    bucket: "{{ storage_bucket }}"
+    mode: put
+    object: "test-write-permission"
+    content: "test"
+    aws_access_key: "{{ storage_access_key }}"
+    aws_secret_key: "{{ storage_secret_key }}"
+    endpoint_url: "{{ storage_endpoint }}"
+  register: write_check
+  ignore_errors: true
+
+- name: Clean up test object
+  aws_s3:
+    bucket: "{{ storage_bucket }}"
+    mode: delobj
+    object: "test-write-permission"
+    aws_access_key: "{{ storage_access_key }}"
+    aws_secret_key: "{{ storage_secret_key }}"
+    endpoint_url: "{{ storage_endpoint }}"
+  when: write_check is success

@@ -1,0 +1,49 @@
+---
+# Main Migration Playbook
+- name: Perform OpenShift namespace migration
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - "../vars/main.yml"
+
+  pre_tasks:
+    - name: Validate input parameters
+      assert:
+        that:
+          - source_cluster is defined
+          - dest_cluster is defined
+          - storage_repo is defined
+          - source_namespace is defined
+          - selected_pvcs is defined
+        fail_msg: "Required parameters are missing"
+
+  roles:
+    - role: cluster_validation
+      vars:
+        cluster_name: "{{ source_cluster }}"
+      tags: [validation, source]
+
+    - role: cluster_validation
+      vars:
+        cluster_name: "{{ dest_cluster }}"
+      tags: [validation, destination]
+
+    - role: storage_validation
+      tags: [validation, storage]
+
+    - role: migration_plan
+      tags: [migration, plan]
+
+    - role: migration_execution
+      tags: [migration, execute]
+
+    - role: email_notification
+      tags: [notification]
+      when: migration_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Succeeded') | list | length > 0
+
+  post_tasks:
+    - name: Display migration results
+      debug:
+        msg: "Migration {{ migration_name }} completed successfully"
+      when: not ansible_check_mode

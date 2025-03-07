@@ -1,0 +1,31 @@
+---
+# Global variables
+ansible_connection: local
+kubeconfig_path: "~/.kube/config"
+
+# MTC operator configuration
+mtc_namespace: openshift-migration
+mtc_operator_group: openshift-migration
+mtc_subscription_name: mtc-operator
+
+# Migration defaults
+default_migration_settings:
+  stage_migrations: false
+  quiesce_pods: false
+  verify_copy: true
+  timeout: 7200
+
+# Validation settings
+validation:
+  connection_timeout: 30
+  retry_attempts: 3
+  retry_delay: 5
+
+# Email notification settings
+email:
+  smtp_host: "{{ smtp_host | default('smtp.example.com') }}"
+  smtp_port: "{{ smtp_port | default('587') }}"
+  smtp_username: "{{ smtp_username }}"
+  smtp_password: "{{ smtp_password }}"
+  from_address: "{{ email_from | default('mtc-automation@example.com') }}"
+  to_addresses: "{{ email_to | default([]) }}"
