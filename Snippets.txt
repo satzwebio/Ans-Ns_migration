@@ -1,0 +1,475 @@
+Fetch Namespaces Before Execution
+
+Use a pre-task that fetches namespaces and stores them in a temporary file or Ansible fact.
+
+- name: Fetch namespaces from OpenShift
+  command: oc get ns -o jsonpath='{.items[*].metadata.name}'
+  register: namespaces
+
+
+---------------------
+
+When a user selects a cluster, the playbook should validate the connection using oc login.
+
+Cluster YAML Example (inventory/clusters.yml)
+
+clusters:
+  - name: "ClusterA"
+    url: "https://api.cluster-a.example.com:6443"
+    token: "sha256~your-token-here"
+  - name: "ClusterB"
+    url: "https://api.cluster-b.example.com:6443"
+    token: "sha256~your-token-here"
+
+Validation Task (roles/validate_cluster/tasks/main.yml)
+
+- name: Validate OpenShift cluster connection
+  shell: oc login {{ item.url }} --token={{ item.token }} --insecure-skip-tls-verify=true
+  loop: "{{ clusters }}"
+  register: login_results
+  ignore_errors: true
+
+- name: Show validation results
+  debug:
+    msg: "{{ item.stderr if item.failed else 'Connected successfully to ' + item.item.name }}"
+  loop: "{{ login_results.results }}"
+
+
+----------------------------------------------
+
+
+Similar to clusters, we'll store replication repositories in YAML and allow dynamic selection.
+
+Replication Repo YAML Example (inventory/repos.yml)
+
+repos:
+  - name: "S3Repo1"
+    url: "https://s3.example.com"
+    bucket: "backup-bucket"
+    credentials: "sha256~repo-creds-here"
+  - name: "S3Repo2"
+    url: "https://s3.backup.com"
+    bucket: "restore-bucket"
+    credentials: "sha256~repo-creds-here"
+
+
+Validation Task (roles/validate_repo/tasks/main.yml)
+- name: Validate repository connection
+  shell: > 
+    curl -X GET {{ item.url }} --header "Authorization: Bearer {{ item.credentials }}"
+  loop: "{{ repos }}"
+  register: repo_results
+  ignore_errors: true
+
+- name: Show validation results
+  debug:
+    msg: "{{ item.stderr if item.failed else 'Connected successfully to ' + item.item.name }}"
+  loop: "{{ repo_results.results }}"
+
+
+---------------------------------------------
+
+Step 2: Survey UI Fields in Ansible Tower
+The survey UI should have the following fields:
+
+Source Cluster (Dropdown - dynamically fetched)
+Destination Cluster (Dropdown)
+Replication Repository (Dropdown)
+Source Namespace (Dropdown - dynamically fetched)
+Destination Namespace (Default: Same as Source, but editable)
+PVC List (Multi-select - dynamically fetched, names should be editable)
+Progress Bar (To monitor migration status)
+
+
+[
+  {
+    "variable": "source_cluster",
+    "type": "multiplechoice",
+    "choices": ["ClusterA", "ClusterB"],
+    "required": true
+  },
+  {
+    "variable": "destination_cluster",
+    "type": "multiplechoice",
+    "choices": ["ClusterA", "ClusterB"],
+    "required": true
+  },
+  {
+    "variable": "replication_repo",
+    "type": "multiplechoice",
+    "choices": ["S3Repo1", "S3Repo2"],
+    "required": true
+  },
+  {
+    "variable": "source_namespace",
+    "type": "text",
+    "default": "",
+    "required": true
+  },
+  {
+    "variable": "destination_namespace",
+    "type": "text",
+    "default": "{{ source_namespace }}",
+    "required": true
+  },
+  {
+    "variable": "pvc_list",
+    "type": "multiselect",
+    "choices": ["PVC1", "PVC2", "PVC3"],
+    "required": false
+  }
+]
+
+--------------------------
+
+Ansible Playbook (playbooks/migration.yml)
+
+- name: OpenShift Namespace Migration
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - "../inventory/{{ env }}/clusters.yml"
+    - "../inventory/{{ env }}/repos.yml"
+  roles:
+    - validate_cluster
+    - validate_repo
+    - fetch_namespaces
+    - fetch_pvcs
+    - create_migplan
+    - create_migmigration
+
+
+------------------------------------
+
+MigPlan Role (roles/create_migplan/tasks/main.yml)
+
+- name: Create MigPlan
+  template:
+    src: migplan.yml.j2
+    dest: "/tmp/migplan-{{ source_namespace }}.yaml"
+
+- name: Apply MigPlan
+  command: oc apply -f /tmp/migplan-{{ source_namespace }}.yaml --kubeconfig={{ source_cluster.kubeconfig }}
+
+
+----------------------------------
+
+MigMigration Role (roles/create_migmigration/tasks/main.yml)
+
+- name: Generate Unique MigMigration Name
+  set_fact:
+    migmigration_name: "migmigration-{{ source_namespace }}-{{ ansible_date_time.epoch }}"
+
+- name: Create MigMigration
+  template:
+    src: migmigration.yml.j2
+    dest: "/tmp/{{ migmigration_name }}.yaml"
+
+- name: Apply MigMigration
+  command: oc apply -f /tmp/{{ migmigration_name }}.yaml --kubeconfig={{ destination_cluster.kubeconfig }}
+
+- name: Show Migration Progress
+  shell: oc get migmigration {{ migmigration_name }} -o jsonpath='{.status.phase}'
+  register: migration_status
+  until: migration_status.stdout == "Completed"
+  retries: 20
+  delay: 30
+
+------------------------------------------------
+
+User Prompt Before Migration (roles/create_migmigration/tasks/main.yml)
+
+- name: Show migration details
+  debug:
+    msg: "MigMigration will be created as {{ migmigration_name }}. Proceed? (yes/no)"
+
+- name: User confirmation
+  pause:
+    prompt: "Type 'yes' to proceed, 'no' to cancel"
+  register: user_input
+
+- name: Abort if user declines
+  fail:
+    msg: "Migration canceled by user"
+  when: user_input.user_input != "yes"
+
+
+--------------------------------
+
+roles/create_migplan/templates/migplan.yml.j2
+
+
+apiVersion: migration.openshift.io/v1alpha1
+kind: MigPlan
+metadata:
+  name: migplan-{{ source_namespace }}-to-{{ destination_cluster }}
+  namespace: openshift-migration
+spec:
+  persistentVolumes:
+    - name: pvc-migration
+      selection:
+        action: copy
+      storageClass: "{{ storage_class | default('gp2') }}"
+  srcMigClusterRef:
+    name: "{{ source_cluster }}"
+    namespace: openshift-migration
+  destMigClusterRef:
+    name: "{{ destination_cluster }}"
+    namespace: openshift-migration
+  migStorageRef:
+    name: "{{ replication_repo }}"
+    namespace: openshift-migration
+  namespaces:
+    - "{{ source_namespace }}"
+
+---------------------------------------
+
+roles/create_migmigration/templates/migmigration.yml.j2
+
+apiVersion: migration.openshift.io/v1alpha1
+kind: MigMigration
+metadata:
+  name: "{{ migmigration_name }}"
+  namespace: openshift-migration
+spec:
+  migPlanRef:
+    name: "migplan-{{ source_namespace }}-to-{{ destination_cluster }}"
+    namespace: openshift-migration
+  stage: false
+  quiescePods: false
+  rollback: false
+  keepAnnotations: true
+  verify: true
+
+--------------------------------
+
+surveys/create_cluster_repo.json
+
+
+[
+  {
+    "variable": "operation",
+    "type": "multiplechoice",
+    "choices": ["Add Cluster", "Add Repository"],
+    "required": true
+  },
+  {
+    "variable": "cluster_name",
+    "type": "text",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "cluster_url",
+    "type": "text",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "cluster_token",
+    "type": "password",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "repo_name",
+    "type": "text",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "repo_url",
+    "type": "text",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "repo_bucket",
+    "type": "text",
+    "default": "",
+    "required": false
+  },
+  {
+    "variable": "repo_creds",
+    "type": "password",
+    "default": "",
+    "required": false
+  }
+]
+
+
+-----------------------
+
+playbooks/create_cluster_repo.yml
+
+- name: Create Cluster or Repository
+  hosts: localhost
+  gather_facts: false
+  tasks:
+
+    - name: Add Cluster to YAML
+      when: operation == "Add Cluster"
+      block:
+        - name: Read existing clusters
+          include_vars:
+            file: "../inventory/clusters.yml"
+          ignore_errors: true
+
+        - name: Append new cluster to list
+          set_fact:
+            new_clusters: "{{ clusters + [{'name': cluster_name, 'url': cluster_url, 'token': cluster_token}] }}"
+
+        - name: Save updated cluster list
+          copy:
+            dest: "../inventory/clusters.yml"
+            content: "{{ {'clusters': new_clusters} | to_nice_yaml }}"
+
+        - name: Validate Cluster Connection
+          shell: oc login {{ cluster_url }} --token={{ cluster_token }} --insecure-skip-tls-verify=true
+          register: cluster_validation
+          ignore_errors: true
+
+        - name: Show validation result
+          debug:
+            msg: "{{ cluster_validation.stderr if cluster_validation.failed else 'Cluster added & validated successfully!' }}"
+
+    - name: Add Repository to YAML
+      when: operation == "Add Repository"
+      block:
+        - name: Read existing repos
+          include_vars:
+            file: "../inventory/repos.yml"
+          ignore_errors: true
+
+        - name: Append new repo to list
+          set_fact:
+            new_repos: "{{ repos + [{'name': repo_name, 'url': repo_url, 'bucket': repo_bucket, 'credentials': repo_creds}] }}"
+
+        - name: Save updated repo list
+          copy:
+            dest: "../inventory/repos.yml"
+            content: "{{ {'repos': new_repos} | to_nice_yaml }}"
+
+        - name: Validate Repository Connection
+          shell: curl -X GET {{ repo_url }} --header "Authorization: Bearer {{ repo_creds }}"
+          register: repo_validation
+          ignore_errors: true
+
+        - name: Show validation result
+          debug:
+            msg: "{{ repo_validation.stderr if repo_validation.failed else 'Repository added & validated successfully!' }}"
+
+
+-------------------------------------
+
+
+Create a Custom Credential Type for Clusters
+Go to: Ansible Tower → Administration → Credential Types
+
+Click "Add", and define the fields as:
+
+Name: OpenShift Cluster Credentials
+Input Configuration
+
+
+{
+  "fields": [
+    {"id": "cluster_url", "type": "string", "label": "Cluster URL"},
+    {"id": "cluster_token", "type": "string", "label": "Cluster Token", "secret": true}
+  ]
+}
+
+
+
+Injector Configuration:
+
+{
+  "extra_vars": {
+    "cluster_url": "{{ cluster_url }}",
+    "cluster_token": "{{ cluster_token }}"
+  }
+}
+
+----------------------------------------------
+
+
+B. Create a Custom Credential Type for Repositories
+Go to: Ansible Tower → Administration → Credential Types
+
+Click "Add", and define the fields:
+
+Name: Migration Repository Credentials
+Input Configuration:
+json
+Copy
+Edit
+{
+  "fields": [
+    {"id": "repo_url", "type": "string", "label": "Repo URL"},
+    {"id": "repo_bucket", "type": "string", "label": "Bucket Name"},
+    {"id": "repo_creds", "type": "string", "label": "Repo Credentials", "secret": true}
+  ]
+}
+Injector Configuration:
+json
+Copy
+Edit
+{
+  "extra_vars": {
+    "repo_url": "{{ repo_url }}",
+    "repo_bucket": "{{ repo_bucket }}",
+    "repo_creds": "{{ repo_creds }}"
+  }
+}
+Save it and add repository credentials in Ansible Tower → Credentials.
+
+Modify Playbook to Fetch Data from Tower
+playbooks/create_cluster_repo.yml
+
+- name: Validate Cluster & Repo in Tower
+  hosts: localhost
+  gather_facts: false
+  tasks:
+
+    - name: Validate Cluster Connection
+      shell: "oc login {{ cluster_url }} --token={{ cluster_token }} --insecure-skip-tls-verify=true"
+      register: cluster_validation
+      ignore_errors: true
+      when: operation == "Add Cluster"
+
+    - name: Show Cluster Validation Result
+      debug:
+        msg: "{{ cluster_validation.stderr if cluster_validation.failed else 'Cluster added & validated successfully!' }}"
+      when: operation == "Add Cluster"
+
+    - name: Validate Repository Connection
+      shell: "curl -X GET {{ repo_url }} --header 'Authorization: Bearer {{ repo_creds }}'"
+      register: repo_validation
+      ignore_errors: true
+      when: operation == "Add Repository"
+
+    - name: Show Repo Validation Result
+      debug:
+        msg: "{{ repo_validation.stderr if repo_validation.failed else 'Repository added & validated successfully!' }}"
+      when: operation == "Add Repository"
+
+ How It Works in Ansible Tower
+Users enter clusters/repo details in the Survey UI.
+Credentials are stored in Ansible Tower's credential store (not plaintext files).
+The playbook fetches credentials dynamically from Tower and validates them.
+No sensitive data is stored on disk—all secrets stay within Ansible To
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
